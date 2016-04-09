@@ -1,15 +1,15 @@
 -- Script for setting up the Barman FDW
 --------------------------------------------
 
-create extension multicorn;
+CREATE EXTENSION multicorn;
 
-create server barman_fdw foreign data wrapper multicorn options (
-    wrapper 'barman_fdw.BarmanFDW.BarmanForeignDataWrapper',
-    barman_host '127.0.0.1');
+CREATE SERVER barman_fdw FOREIGN DATA WRAPPER multicorn OPTIONS (
+  wrapper 'barman_fdw.BarmanFDW.BarmanForeignDataWrapper',
+  barman_host '127.0.0.1');
 
 CREATE FOREIGN TABLE barman (
-    server character varying,
-    backups character varying,
-    description character varying,
-    config jsonb
-) server barman_fdw;
+  server CHARACTER VARYING,
+  backups CHARACTER VARYING,
+  description CHARACTER VARYING,
+  config  JSONB
+) SERVER barman_fdw;

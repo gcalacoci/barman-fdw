@@ -120,7 +120,7 @@ class BarmanEnhancedForeignDataWrapper(ForeignDataWrapper):
                                              type_oid=1043,
                                              type_name='character varying'
                                              ))
-                tables.append(table)
+                        tables.append(table)
 
             table_config = TableDefinition(table_name='server_config')
             table_config.options['schema'] = schema
