@@ -1,3 +1,5 @@
+# Copyright (C) 2016 Giulio Calacoci
+#
 # This file is part of BarmanFDW.
 #
 # BarmanFDW is free software: you can redistribute it and/or modify
@@ -57,131 +59,187 @@ class BarmanEnhancedForeignDataWrapper(ForeignDataWrapper):
 
     def execute(self, quals, columns, **kwargs):
         """
-        This method is invoked every time a SELECT is executed
+        This method is called every time a SELECT is executed
         on the foreign table.
+        Manage the SELECT statements using the table_name option
+        to build the different rows.
 
         :param list quals:a list of conditions which are used
           are used in the WHERE part of the select and can be used
           to restrict the number of the results
         :param list columns: the columns of the foreign table
         """
-        # create a client object using the apikey
-        # Ports are handled in ~/.ssh/config since we use OpenSSH
-        diagnose = "barman diagnose"
-        barman_host = "%s@%s" % (self.barman_user,
-                                 self.barman_host)
-        ssh = subprocess.Popen(["ssh", "%s" % barman_host, diagnose],
-                               shell=False,
-                               stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE)
-        output = ssh.communicate()
-        result = json.loads(output[0])
-        if output[1]:
-            error = ssh.stderr.readlines()
-            log_to_postgres("ERROR: %s" % error, DEBUG)
-        else:
-            servers = result['servers']
-            for server, values in servers.items():
-                if self.table_name == 'server_config':
-                    line = {
-                        'server': server,
-                        'description': values['config']['description'],
-                        'config': json.dumps(values['config'])
-                    }
-                    yield line
-                elif self.table_name =='server_status':
-                    line = {'server': server}
-                    for key, value in values['status'].items():
-                        line[key] = value
-                    yield line
-                else:
-                    server = server.replace('-', '_').replace('.', '_')
-                    for backup, properties in values['backups'].items():
-
-                        if server == self.table_name.replace('-',
-                                                             '_').replace('.',
-                                                                          '_'):
-
-                            line = {}
-                            for key in properties.keys():
-                                line[key] = properties[key]
-                            yield line
+        # Execute the diagnose through ssh
+        errors, result = self._execute_barman_cmd("barman diagnose")
+        if errors:
+            # if any error occurred, return
+            return
+        # Otherwise, load the results using json
+        result = json.loads(result)
+        servers = result['servers']
+        for server, values in servers.items():
+            if self.table_name == 'server_config':
+                # if the query have been executed on the server_config table,
+                # prepare the results
+                line = {
+                    'server': server,
+                    'description': values['config']['description'],
+                    'config': json.dumps(values['config'])
+                }
+                yield line
+            elif self.table_name == 'server_status':
+                # if the query have been executed on the server_status table,
+                # prepare the results iterating through the fields of the
+                # status json object.
+                line = {'server': server}
+                for key, value in values['status'].items():
+                    line[key] = value
+                yield line
+            else:
+                # Otherwise the query have been executed on one of the
+                # the tables representing a barman server.
+                # prepare the results iterating through the fields of the
+                # status json object.
+                server = server.replace('-', '_').replace('.', '_')
+                for backup, properties in values['backups'].items():
+                    # Iterates the list of servers looking for the right one.
+                    if server == self.table_name.replace('-',
+                                                         '_').replace('.',
+                                                                      '_'):
+                        # Create the result line.
+                        line = {}
+                        for key in properties.keys():
+                            line[key] = properties[key]
+                        yield line
 
     @classmethod
     def import_schema(self, schema, srv_options, options, restriction_type,
                       restricts):
         """
-        Hook called on an IMPORT FOREIGN SCHEMA command.
+        Called on an IMPORT FOREIGN SCHEMA command.
 
+        Populates a PostgreSQL schema using the json output of the
+        barman diagnose command.
+        This method iterates through the results of the diagnose command,
+        creates a foreign table for every server using the field of the backup
+        json object as columns of the table.
+        Additionally creates 2 tables: 'server_config' and 'server_status'
+        'server_config' contains the name, description and json
+        configuration of every barman server stored in a jsonb column.
+        'server_status' contains the status of every server,
+        using as columns the field of the status json object.
+
+        Every table is created using the 'table_name' server option.
+        The table_name is used during the execution of SELECT statements to
+        retrieve the correct table for the execution of the query.
         """
-        diagnose = "barman diagnose"
-        barman_host = "%s@%s" %(srv_options['barman_user'],
-                                srv_options['barman_host'])
-        ssh = subprocess.Popen(["ssh", "%s" % barman_host, diagnose],
+        # Executes the barman diagnose command through ssh connection
+        errors, result = self._execute_barman_cmd("barman diagnose",
+                                                  srv_options['barman_user'],
+                                                  srv_options['barman_host'])
+        # if an error is present, return.
+        if errors:
+            return
+        # Load the result using json
+        result = json.loads(result)
+        servers = result['servers']
+        tables = []
+        # Iterates through the available servers
+        for server, values in servers.items():
+            # Encodes the name of the server replacing - and . characters
+            # with _
+            server = server.replace('-', '_').replace('.', '_')
+            log_to_postgres('schema %s table %s' % (schema, server), DEBUG)
+            for backup, properties in values['backups'].items():
+                # Creates a table for every server. uses the fields of the
+                # keys of the json object as columns.
+                table = TableDefinition(table_name=server)
+                table.options['schema'] = schema
+                # set the encoded server name as table name
+                table.options['table_name'] = server
+                self._format_table(properties, table)
+                # Add the table to the list of the tables.
+                tables.append(table)
+        # Create the server_config table
+        table_config = TableDefinition(table_name='server_config')
+        table_config.options['schema'] = schema
+        # Set the table name
+        table_config.options['table_name'] = 'server_config'
+        # Create the columns
+        table_config.columns.append(
+            ColumnDefinition(
+                column_name='server',
+                type_name='character varying'
+            ))
+        table_config.columns.append(
+            ColumnDefinition(
+                column_name='description',
+                type_name='character varying'
+            ))
+        table_config.columns.append(
+            ColumnDefinition(
+                column_name='config',
+                type_name='jsonb'
+            ))
+        # Add the table to the list of the tables.
+        tables.append(table_config)
+        # Create the server_status table
+        table_status = TableDefinition(table_name='server_status')
+        table_status.options['schema'] = schema
+        table_status.options['table_name'] = 'server_status'
+        # Iterates through the fields of the status json object,
+        # and use them to create the columns of the table
+        for server, values in servers.items():
+            self._format_table(values['status'], table_status)
+            break
+        # Adds a column containing the server name.
+        table_status.columns.append(
+            ColumnDefinition(
+                column_name='server',
+                type_name='character varying'
+            ))
+        # Add the table to the list of the tables.
+        tables.append(table_status)
+        return tables
+
+    @staticmethod
+    def _format_table(properties, table):
+        """
+        Utility method. Given a dict and a TableDefinition object
+        iterates through the dict and populate the table
+        using the dict keys
+
+        :param dict properties: the dict holding the keys
+          used to build the table
+        :param TableDefinition table: the table to build
+        """
+        for key in properties.keys():
+            table.columns.append(
+                ColumnDefinition(column_name=key,
+                                 type_name='character varying'
+                                 ))
+
+    @staticmethod
+    def _execute_barman_cmd(barman_cmd, barman_user, barman_host):
+        """
+        Utility method. Executes a barman command using ssh.
+        Logs errors if something is written in the stderr
+
+        :param str barman_cmd: the command we want to execute
+        :param str barman_user: the ssh user
+        :param str barman_host: the host to connect to
+        """
+        ssh = "%s@%s" % (barman_user, barman_host)
+        cmd = subprocess.Popen(["ssh", "%s" % ssh, barman_cmd],
                                shell=False,
                                stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE)
-        output = ssh.communicate()
-        result = json.loads(output[0])
-        if output[1]:
-            error = ssh.stderr.readlines()
-            log_to_postgres("ERROR: %s" % error, DEBUG)
-        else:
-            servers = result['servers']
-            tables = []
-            for server, values in servers.items():
-                server = server.replace('-', '_').replace('.', '_')
-                log_to_postgres('schema %s table %s' % (schema, server), DEBUG)
-                for backup, properties in values['backups'].items():
-                    table = TableDefinition(table_name=server)
-                    table.options['schema'] = schema
-                    table.options['table_name'] = server
-                    for key in properties.keys():
-                        table.columns.append(
-                            ColumnDefinition(column_name=key,
-                                             type_oid=1043,
-                                             type_name='character varying'
-                                             ))
-                    tables.append(table)
-
-            table_config = TableDefinition(table_name='server_config')
-            table_config.options['schema'] = schema
-            table_config.options['table_name'] = 'server_config'
-            table_config.columns.append(
-                ColumnDefinition(
-                    column_name='server',
-                    type_name='character varying'
-                ))
-            table_config.columns.append(
-                ColumnDefinition(
-                    column_name='description',
-                    type_name='character varying'
-                ))
-            table_config.columns.append(
-                ColumnDefinition(
-                    column_name='config',
-                    type_name='jsonb'
-                ))
-            tables.append(table_config)
-            table_status = TableDefinition(table_name='server_status')
-            table_status.options['schema'] = schema
-            table_status.options['table_name'] = 'server_status'
-            for server, values in servers.items():
-                for key in values['status'].keys():
-                    table_status.columns.append(
-                        ColumnDefinition(
-                            column_name=key,
-                            type_name='character varying'
-                        )
-                    )
-                break
-            table_status.columns.append(
-                ColumnDefinition(
-                    column_name='server',
-                    type_name='character varying'
-                ))
-            tables.append(table_status)
-            return tables
+        output = cmd.communicate()
+        errors = True if output[1] else False
+        if errors:
+            std_err = cmd.stderr.readlines()
+            log_to_postgres("ERROR: %s" % std_err, ERROR)
+        return errors, output[0]
 
     @property
     def rowid_column(self):
@@ -191,19 +249,16 @@ class BarmanEnhancedForeignDataWrapper(ForeignDataWrapper):
         """
         This method is invoked every time a SELECT is executed
         on the foreign table.
-
         """
         log_to_postgres('Barman FDW INSERT output:  %s' % new_values, DEBUG)
+        # Build the backup command
         backup_cmd = "barman backup %s" % new_values['server_name']
-
-        log_to_postgres('Barman FDW INSERT output:  %s' % backup_cmd, DEBUG)
-        ssh = subprocess.Popen(["ssh", '-A', "%s" % self.barman_host,
-                                backup_cmd],
-                               shell=False,
-                               stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE)
-        output = ssh.communicate()
-
-        log_to_postgres('Barman FDW INSERT output:  %s' % output[0], DEBUG)
-        log_to_postgres('Barman FDW INSERT errors:  %s' % output[1], DEBUG)
+        errors, result = self._execute_barman_cmd(backup_cmd,
+                                                  self.barman_user,
+                                                  self.barman_host)
+        if errors:
+            # Return if error are present
+            return
+        # We need to return something for the RETURNING
+        # clause of the INSERT statement.
         return new_values

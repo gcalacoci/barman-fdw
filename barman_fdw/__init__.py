@@ -1,4 +1,6 @@
-# This file is part of BarmanFDW.
+# Copyright (C) 2016 Giulio Calacoci
+#
+#  This file is part of BarmanFDW.
 #
 # BarmanFDW is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by

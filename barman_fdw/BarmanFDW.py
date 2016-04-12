@@ -1,3 +1,5 @@
+# Copyright (C) 2016 Giulio Calacoci
+#
 # This file is part of BarmanFDW.
 #
 # BarmanFDW is free software: you can redistribute it and/or modify
@@ -38,14 +40,17 @@ class BarmanForeignDataWrapper(ForeignDataWrapper):
         # The columns we'll be using (defaults to 'all'):
         self.columns = columns
 
-        log_to_postgres('Barman FDW Config options:  %s' % options, DEBUG)
-        log_to_postgres('Barman FDW Config columns:  %s' % columns, DEBUG)
-
-        if options.has_key('barman_host'):
-            self.barman_host = options['barman_host']
-        else:
+        if 'barman_user' not in options:
+            log_to_postgres('The barman_user parameter is required', ERROR)
+        if 'barman_host' not in options:
             log_to_postgres('Option barman_host is required for '
                             'the Barman FDW setup.', ERROR)
+
+        self.barman_host = options['barman_host']
+        self.barman_user = options['barman_user']
+
+        log_to_postgres('Barman FDW Config options:  %s' % options, DEBUG)
+        log_to_postgres('Barman FDW Config columns:  %s' % columns, DEBUG)
 
     def execute(self, quals, columns, **kwargs):
         """
@@ -59,9 +64,10 @@ class BarmanForeignDataWrapper(ForeignDataWrapper):
         """
         # create a client object using the apikey
         # Ports are handled in ~/.ssh/config since we use OpenSSH
-        diagnose = "barman diagnose"
-
-        ssh = subprocess.Popen(["ssh", "%s" % self.barman_host, diagnose],
+        diagnose_cmd = "barman diagnose"
+        ssh_cmd = "%s@%s" % (self.barman_user,
+                             self.barman_host)
+        ssh = subprocess.Popen(["ssh", "%s" % ssh_cmd, diagnose_cmd],
                                shell=False,
                                stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE)
@@ -69,10 +75,10 @@ class BarmanForeignDataWrapper(ForeignDataWrapper):
         result = json.loads(output[0])
         if output[1]:
             error = ssh.stderr.readlines()
-            log_to_postgres("ERROR: %s" % error)
+            log_to_postgres("ERROR: %s" % error, DEBUG)
         else:
             servers = result['servers']
-            for server, values in servers.iteritems():
+            for server, values in servers.items():
                 line = {
                     'server': server,
                     'backups': len(values['backups']),
@@ -89,18 +95,19 @@ class BarmanForeignDataWrapper(ForeignDataWrapper):
         """
         This method is invoked every time a SELECT is executed
         on the foreign table.
-
         """
-        log_to_postgres('Barman FDW INSERT output:  %s' % new_values )
+        log_to_postgres('Barman FDW INSERT output:  %s' % new_values)
         backup_cmd = "barman backup %s" % new_values['server']
-
-        log_to_postgres('Barman FDW INSERT output:  %s' % backup_cmd )
-        ssh = subprocess.Popen(["ssh", '-A', "%s" % self.barman_host, backup_cmd],
+        ssh_cmd = "%s@%s" % (self.barman_user,
+                             self.barman_host)
+        log_to_postgres('Barman FDW INSERT output:  %s' % backup_cmd)
+        ssh = subprocess.Popen(["ssh", '-A', "%s" % ssh_cmd,
+                                backup_cmd],
                                shell=False,
                                stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE)
         output = ssh.communicate()
 
-        log_to_postgres('Barman FDW INSERT output:  %s' % output[0] )
-        log_to_postgres('Barman FDW INSERT errors:  %s' % output[1] )
+        log_to_postgres('Barman FDW INSERT output:  %s' % output[0])
+        log_to_postgres('Barman FDW INSERT errors:  %s' % output[1])
         return new_values
