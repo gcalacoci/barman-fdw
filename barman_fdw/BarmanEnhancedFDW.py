@@ -70,7 +70,9 @@ class BarmanEnhancedForeignDataWrapper(ForeignDataWrapper):
         :param list columns: the columns of the foreign table
         """
         # Execute the diagnose through ssh
-        errors, result = self._execute_barman_cmd("barman diagnose")
+        errors, result = self._execute_barman_cmd("barman diagnose",
+                                                  self.barman_user,
+                                                  self.barman_host)
         if errors:
             # if any error occurred, return
             return
@@ -150,16 +152,18 @@ class BarmanEnhancedForeignDataWrapper(ForeignDataWrapper):
             # with _
             server = server.replace('-', '_').replace('.', '_')
             log_to_postgres('schema %s table %s' % (schema, server), DEBUG)
+            table = TableDefinition(table_name=server)
+            table.options['schema'] = schema
+            table.options['table_name'] = server
             for backup, properties in values['backups'].items():
                 # Creates a table for every server. uses the fields of the
                 # keys of the json object as columns.
-                table = TableDefinition(table_name=server)
-                table.options['schema'] = schema
                 # set the encoded server name as table name
-                table.options['table_name'] = server
                 self._format_table(properties, table)
                 # Add the table to the list of the tables.
-                tables.append(table)
+                log_to_postgres('schema %s table %s' % (schema, server))
+                break
+            tables.append(table)
         # Create the server_config table
         table_config = TableDefinition(table_name='server_config')
         table_config.options['schema'] = schema
@@ -230,14 +234,14 @@ class BarmanEnhancedForeignDataWrapper(ForeignDataWrapper):
         :param str barman_host: the host to connect to
         """
         ssh = "%s@%s" % (barman_user, barman_host)
-        cmd = subprocess.Popen(["ssh", "%s" % ssh, barman_cmd],
+        cmd = subprocess.Popen(["ssh", "-A", "%s" % ssh, barman_cmd],
                                shell=False,
                                stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE)
         output = cmd.communicate()
         errors = True if output[1] else False
         if errors:
-            std_err = cmd.stderr.readlines()
+            std_err = output[1]
             log_to_postgres("ERROR: %s" % std_err, ERROR)
         return errors, output[0]
 
