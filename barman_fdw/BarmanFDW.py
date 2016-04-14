@@ -93,7 +93,7 @@ class BarmanForeignDataWrapper(ForeignDataWrapper):
 
     def insert(self, new_values):
         """
-        This method is invoked every time a SELECT is executed
+        This method is invoked every time a INSERT is executed
         on the foreign table.
         """
         log_to_postgres('Barman FDW INSERT output:  %s' % new_values)
